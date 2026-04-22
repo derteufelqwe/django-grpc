@@ -54,10 +54,10 @@ class Command(BaseCommand):
         """Setup signal handlers (inspired by Gunicorn arbiter.py)"""
         # Store SIGTERM handler
         self._original_sigterm_handler = signal.signal(signal.SIGTERM, self._handle_sigterm)
-        
+
         # Also set SIGINT handler (Ctrl+C)
         signal.signal(signal.SIGINT, self._handle_sigterm)
-        
+
         self.stdout.write("Signal handlers registered for graceful shutdown")
 
     def _handle_sigterm(self, signum, frame):
@@ -70,7 +70,7 @@ class Command(BaseCommand):
         try:
             # Stop accepting new connections
             self.stdout.write("Stopping server from accepting new connections...")
-            
+
             # Stop gRPC server (with grace=True to wait for ongoing requests to complete)
             if hasattr(server, 'stop'):
                 # For synchronous server
@@ -78,12 +78,12 @@ class Command(BaseCommand):
             else:
                 # For asynchronous server
                 asyncio.create_task(server.stop(grace=True))
-            
+
             # Send Django signal
             grpc_shutdown.send(None)
-            
+
             self.stdout.write("Graceful shutdown completed")
-            
+
         except Exception as e:
             self.stderr.write(f"Error during graceful shutdown: {e}")
 
@@ -92,15 +92,15 @@ class Command(BaseCommand):
         try:
             # Stop accepting new connections
             self.stdout.write("Stopping async server from accepting new connections...")
-            
+
             # Stop gRPC async server
             await server.stop(grace=True)
-            
+
             # Send Django signal
             grpc_shutdown.send(None)
-            
+
             self.stdout.write("Async graceful shutdown completed")
-            
+
         except Exception as e:
             self.stderr.write(f"Error during async graceful shutdown: {e}")
 
@@ -108,7 +108,7 @@ class Command(BaseCommand):
         """
         Run gRPC server
         """
-        autoreload.raise_last_exception()
+
         self.stdout.write("gRPC server starting at %s" % datetime.datetime.now())
 
         # Only setup signal handlers when not in autoreload mode
@@ -151,6 +151,7 @@ class Command(BaseCommand):
         """
         Run gRPC server in async mode
         """
+        autoreload.raise_last_exception()
         self.stdout.write("gRPC async server starting  at %s" % datetime.datetime.now())
 
         # Only setup signal handlers when not in autoreload mode
@@ -160,11 +161,10 @@ class Command(BaseCommand):
 
         # Coroutines to be invoked when the event loop is shutting down.
         _cleanup_coroutines = []
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-        server = create_server(max_workers, port)
-        self._server = server
-
-        async def _main_routine():
+        async def _main_routine(server):
             await server.start()
             self.stdout.write("gRPC async server is listening port %s" % port)
 
@@ -191,17 +191,20 @@ class Command(BaseCommand):
             # https://github.com/gluk-w/django-grpc/issues/31
             grpc_shutdown.send(None)
 
-        loop = asyncio.get_event_loop()
         try:
-            loop.run_until_complete(_main_routine())
+            server = create_server(max_workers, port)
+            self._server = server
+            loop.run_until_complete(_main_routine(server))
         except KeyboardInterrupt:
             if not kwargs.get("autoreload", False):
                 self.stdout.write("Received keyboard interrupt, starting graceful shutdown...")
                 self._shutdown_event.set()
-                loop.run_until_complete(_main_routine())
+                loop.run_until_complete(_main_routine(server))
             else:
                 # Ignore KeyboardInterrupt in autoreload mode and exit normally
                 pass
         finally:
-            loop.run_until_complete(*_cleanup_coroutines)
+            if _cleanup_coroutines:
+                loop.run_until_complete(asyncio.gather(*_cleanup_coroutines))
             loop.close()
+            asyncio.set_event_loop(None)
